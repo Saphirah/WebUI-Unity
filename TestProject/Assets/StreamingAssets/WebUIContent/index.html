@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Unity Chromium Overlay</title>
+<script src="https://ue.local/__webui/webui.js"></script>
+<style>html,body{margin:0;background:transparent;font:18px sans-serif;color:white}button{position:absolute;left:24px;top:24px;width:240px;height:110px;background:#e57924;color:white;border:0;border-radius:14px;transition:background .12s,transform .12s}button:hover{background:#317ddd;transform:scale(1.03)}input{position:absolute;left:300px;top:24px;width:230px;height:42px}#status{position:absolute;left:24px;top:170px;pointer-events:none}</style>
+</head><body><button id="button">Chromium → Unity</button><input id="field" placeholder="Type here"><div id="status">Transparent HTML over the game</div>
+<script>
+globalThis.ue=globalThis.ue||{};ue.interface=ue.interface||{};
+ue.interface.echo=value=>({received:value});
+button.onclick=()=>webui.broadcast('clicked',{time:performance.now()});
+field.oninput=()=>webui.broadcast('typed',field.value);
+webui.ready.then(async()=>{const result=await webui.request('fromJS',{value:7});document.getElementById('status').textContent='C# replied: '+JSON.stringify(result);webui.broadcast('ready',result);});
+</script></body></html>

@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chromium / Unity · Interaction lab</title>
+<script src="https://ue.local/__webui/webui.js"></script>
+<style>
+*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;background:transparent;color:#ecf3ff;font:15px system-ui,sans-serif;overflow:hidden;user-select:none;pointer-events:none}
+main{position:absolute;left:6vw;top:14vh;width:min(310px,35vw);pointer-events:none}
+.eyebrow{color:#66d6e6;font-size:11px;letter-spacing:.2em;text-transform:uppercase}h1{font-size:clamp(28px,4vw,52px);line-height:1.04;letter-spacing:-.045em;margin:20px 0}p{color:#a2afc4;line-height:1.65;margin:0 0 28px}
+nav{display:grid;gap:12px;pointer-events:none}button{pointer-events:auto;text-align:left;padding:17px 20px;font:600 15px system-ui;color:#e7f1ff;background:rgba(85,120,170,.12);border:1px solid #526680;border-radius:9px;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}button:hover{background:rgba(72,172,198,.23);border-color:#6bdae7;transform:translateX(4px)}button:active{transform:translateX(4px) scale(.98)}button span{float:right;color:#6ed6e3;pointer-events:none}
+input{pointer-events:auto;width:100%;min-width:0;padding:17px 20px;font:15px system-ui;color:#e7f1ff;background:rgba(85,120,170,.12);border:1px solid #526680;border-radius:9px;outline:none}input::placeholder{color:#9aacc4}input:focus{border-color:#6bdae7;box-shadow:0 0 0 2px rgba(107,218,231,.15)}.hint{position:absolute;left:54%;right:8%;bottom:13vh;text-align:center;color:#acbcd2;font-size:13px;letter-spacing:.02em}.hint strong{display:block;color:#e7f1ff;font-size:17px;margin-bottom:8px}footer{position:absolute;left:6vw;bottom:5vh;color:#72849e;font-size:10px;letter-spacing:.15em;text-transform:uppercase}
+@media(max-height:600px){main{top:8vh}h1{margin:12px 0}p{margin-bottom:16px}nav{gap:8px}button,input{padding:12px 16px}footer{display:none}.hint{bottom:9vh}}
+</style></head><body>
+<main><div class="eyebrow">WebUI / interaction lab</div><h1>Main menu.</h1><p>HTML on top. Unity underneath.</p>
+<nav><button id="reset" data-action="reset">Reset cube <span>↗</span></button><button data-action="color">Change color <span>◈</span></button><input id="menu-input" type="text" aria-label="Text input" placeholder="Enter text…" autocomplete="off" spellcheck="false"></nav>
+</main>
+<div class="hint"><strong>Grab the cube. Give it a spin.</strong>Left-click + drag · transparent HTML passes input through</div>
+<footer>Chromium GPU overlay · Unity 3D</footer>
+<script>
+globalThis.ue=globalThis.ue||{};ue.interface=ue.interface||{};
+ue.interface.debugButton=()=>{const r=document.querySelector('#reset').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,width:innerWidth,height:innerHeight}};
+document.querySelectorAll('button').forEach(button=>button.onclick=()=>webui.broadcast('debugMenu',{action:button.dataset.action}));
+ue.interface.debugInput=()=>{const e=document.querySelector('#menu-input'),r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,value:e.value}};
+webui.ready.then(()=>webui.broadcast('debugReady',{}));
+</script></body></html>

@@ -1,0 +1,9 @@
+{
+  "version": "128.4.12+g1d7a1f9+chromium-128.0.6613.138",
+  "archive": "cef_binary_128.4.12+g1d7a1f9+chromium-128.0.6613.138_windows64_minimal.tar.bz2",
+  "url": "https://cef-builds.spotifycdn.com/cef_binary_128.4.12+g1d7a1f9+chromium-128.0.6613.138_windows64_minimal.tar.bz2",
+  "sha1": "cf996113442821c788fd4e467eed2618b93fcf7c",
+  "sha256": "f451c062e56e71a3639955b945f7f7d5b3a265fec46e27e8f70703c1382474e0",
+  "size": 197048608,
+  "hostSha256": "1f588f72fdd7bd778068f7696e4fea5831ef126066fc24644621c693a172eb58"
+}

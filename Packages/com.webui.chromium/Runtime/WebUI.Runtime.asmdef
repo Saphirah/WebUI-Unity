@@ -1,0 +1,1 @@
+{"name":"WebUI.Runtime","references":["Unity.ugui","Unity.Newtonsoft.Json"],"includePlatforms":["Editor","WindowsStandalone64"],"autoReferenced":true}

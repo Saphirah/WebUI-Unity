@@ -1,0 +1,23 @@
+{
+  "name": "com.webui.chromium",
+  "version": "0.1.1",
+  "displayName": "Chromium Web UI",
+  "description": "Separate-process Chromium overlays with asynchronous JSON messaging for Windows.",
+  "unity": "6000.0",
+  "dependencies": {
+    "com.unity.ugui": "2.0.0",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0",
+    "com.unity.modules.physics": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.ui": "1.0.0"
+  },
+  "samples": [
+    {
+      "displayName": "Transparent Overlay",
+      "description": "HTML overlay and C# JSON round trip.",
+      "path": "Samples~/Overlay"
+    }
+  ]
+}
