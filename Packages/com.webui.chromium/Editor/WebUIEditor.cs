@@ -22,6 +22,7 @@ namespace WebUI.Editor {
             var rect=(RectTransform)go.transform;rect.anchorMin=Vector2.zero;rect.anchorMax=Vector2.one;rect.offsetMin=rect.offsetMax=Vector2.zero;
             var overlay=go.AddComponent<ChromiumOverlay>();overlay.Width=640;overlay.Height=360;
             overlay.RenderMode=Environment.GetCommandLineArgs().Contains("-webui-cpu")?BrowserRenderMode.CPU:BrowserRenderMode.GPURequired;
+            overlay.IndependentComposition=Environment.GetCommandLineArgs().Contains("-webui-composition");
             go.AddComponent<ExampleBridge>();
             go.AddComponent<ValidationProbe>();
             string package=UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(ChromiumOverlay).Assembly).resolvedPath;

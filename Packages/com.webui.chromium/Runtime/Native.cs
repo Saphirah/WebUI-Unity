@@ -3,6 +3,10 @@ using System.Runtime.InteropServices;
 namespace WebUI {
     internal static class Native {
         const string Dll="UnityWebUINative";
+        [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern int UW_CreateComposition(int width,int height,out int error);
+        [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern int UW_ResizeComposition(int id,int width,int height);
+        [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern void UW_ShowComposition(int id,int visible);
+        [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern int UW_CompositionActive(int id);
         [DllImport(Dll,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] internal static extern IntPtr UW_CreatePipe(string name);
         [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern int UW_CreateGPU(IntPtr texture);
         [DllImport(Dll,CallingConvention=CallingConvention.Cdecl)] internal static extern int UW_CreateGPU12(IntPtr texture);

@@ -25,6 +25,18 @@ Dependencies install automatically. The first import downloads the Chromium runt
 
 For transparent overlays, use `html,body{margin:0;background:transparent}`. Use `pointer-events:none` on decorative elements that should pass clicks through. To suppress your own gameplay input over UI, check `overlay.IsPointerOverUI(Input.mousePosition)` and `overlay.BrowserFocused`. With a custom input system, disable **Forward Legacy Input** and forward input through `Session.Mouse`, `Key` and `Focus`.
 
+## Independent Windows presentation
+
+Enable **Independent Composition** on a full-screen `ChromiumOverlay` before it starts. Use a windowed or borderless Windows x64 player with Direct3D 11 or 12 and one composition overlay per player window. The visual fills the client area and follows window resize. Its position, opacity and clipping are independent of the Raw Image. The texture path remains the default and is available in the Editor.
+
+DirectComposition submits transparent browser frames on a native worker, independently of Unity rendering. The worker picks the newest available frame and returns shared textures after the GPU copy. Input and bridge callbacks still run through Unity. **Browser Frame Rate** requests 1–360 FPS from CEF and can be changed at runtime. CEF, the GPU and the display can limit actual throughput.
+
+Use `IndependentPresentationActive` and `IndependentCompositionStatus` to check whether the visual is attached. An initialization failure is reported without switching presentation mode. `PresentedFrames` counts successful DXGI Present calls in this mode. `BrowserTexture` is empty, and Unity screenshots or backbuffer capture can omit the layer.
+
+When a Steam overlay or capture flow opens, call `SetIndependentPresentationSuppressed(true)` on the Unity main thread. Pass `false` when it closes. Suppression hides the layer and releases browser input focus while retaining the page. On restoration and application focus gain, Unity requests a fresh paint. Verify compatibility with the capture or overlay tool you use.
+
+Hit testing uses DOM rectangles. Elements at zero opacity and their descendants pass input through. A transparent-background button still receives input, and a child with `pointer-events:auto` can be interactive inside a parent with `pointer-events:none`.
+
 ## Bridge
 
 Create `GameBridge.cs` and attach it to the Raw Image. Use this component as the session's request handler:
@@ -80,7 +92,15 @@ webui.ready.then(async () => {
 
 To navigate at runtime, call `overlay.Session.LoadURL("https://ue.local/other.html")`; `LoadHTML(html)` loads an HTML string. Set startup fields before enabling the component; changing **Initial URL** during Play does not navigate the current session.
 
+### Frequent state updates
+
+Use `Session.TryCallStateAsync("update", delta)` with a `JObject` to publish absolute fields to a trusted, loaded page. The call snapshots the object and returns whether it accepted the update locally. The pipe writer serializes pending state off Unity's main thread and sends ordinary messages first. Pending updates to the same function merge by top-level field, with the newest value replacing an entire nested object or array.
+
+Send a full state with `"uiReset": true` after each page-ready handshake. Omit that field on deltas. Use `CallAsync` for commands or requests with a reply. If state submission returns `false`, retain the changed fields and retry. Navigation discards pending state associated with the previous document.
+
 ## Build
+
+Run `Scripts/BuildPlayer.ps1 -Composition` and `Scripts/TestPlayer.ps1 -Composition -Resize` to exercise the independent layer in the Windows test player. The smoke test checks resize without reloading the page, overlay suppression and restoration, and continued presentation during a brief Unity main-thread pause.
 
 Build for **Windows x86_64** after runtime installation completes. The build hook copies Chromium automatically; files under `StreamingAssets/WebUIContent` are included by Unity. Use local web assets for a build that runs without a development server.
 

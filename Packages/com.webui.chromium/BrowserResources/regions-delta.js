@@ -18,12 +18,20 @@
     requestAnimationFrame(collect);
     if(t-last<1000/60)return;
     last=t;const start=profiling?performance.now():0;
-    const styles=new WeakMap(),bounds=new WeakMap();
+    const styles=new WeakMap(),bounds=new WeakMap(),invisible=new WeakMap();
     const styleOf=e=>{let s=styles.get(e);if(!s){s=getComputedStyle(e);styles.set(e,s);}return s;};
+    const opacityHidden=e=>{
+      const path=[];
+      while(e&&!invisible.has(e)&&Number(styleOf(e).opacity)!==0){path.push(e);e=e.parentElement;}
+      const hidden=e!==null&&invisible.get(e)!==false;
+      if(e)invisible.set(e,hidden);
+      for(const node of path)invisible.set(node,hidden);
+      return hidden;
+    };
     const boundsOf=e=>{let r=bounds.get(e);if(!r){r=e.getBoundingClientRect();bounds.set(e,r);}return r;};
     function rectangles(e){
       if(profiling)++stats.reads;const result=[];
-      const s=styleOf(e);if(s.pointerEvents==='none'||s.visibility!=='visible')return result;
+      const s=styleOf(e);if(s.pointerEvents==='none'||s.visibility!=='visible'||opacityHidden(e))return result;
       for(const r of e.getClientRects()){
         let left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
         for(let p=e.parentElement;p&&right>left&&bottom>top;p=p.parentElement){

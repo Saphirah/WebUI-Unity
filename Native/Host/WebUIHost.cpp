@@ -1,4 +1,5 @@
 #define NOMINMAX
+#include <algorithm>
 #include <windows.h>
 #include <shellapi.h>
 #include <d3d11_1.h>
@@ -42,7 +43,10 @@ static std::wstring Resources;
 static std::wstring Runtime;
 static bool EnableBridge = true, AllowSelection = false;
 static bool IncrementalDOM=false,ABExperiment=false;
+static bool IndependentComposition=false,RepaintQueued=false;
 static int ViewWidth = 1280, ViewHeight = 720, TargetFPS = 120;
+static uint64_t DocumentSerial=0;
+static bool DocumentReady=false;
 static std::string InitialURL, AdapterLuid;
 static uint64_t FrameSequence = 0;
 // Opt-in diagnostics. No disk I/O occurs in the accelerated-paint callback.
@@ -67,6 +71,13 @@ public: explicit Task(std::function<void()> f):fn(std::move(f)){}
     IMPLEMENT_REFCOUNTING(Task);
 };
 static void UI(std::function<void()> f) { CefPostTask(TID_UI,new Task(std::move(f))); }
+static void RetryViewPaint(){
+    if(RepaintQueued)return;
+    RepaintQueued=CefPostDelayedTask(TID_UI,new Task([]{
+        RepaintQueued=false;
+        if(Browser)Browser->GetHost()->Invalidate(PET_VIEW);
+    }),std::max(1,1000/TargetFPS));
+}
 static std::string ReadResource(const char* name) {
     std::ifstream input(Resources+L"/"+CefString(name).ToWString(),std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input),{});
@@ -220,9 +231,16 @@ public:
             else {D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT,0};ComPtr<ID3D11Query> q;if(SUCCEEDED(Device->CreateQuery(&qd,&q))){Context->End(q.Get());Context->Flush();while(Context->GetData(q.Get(),nullptr,0,0)==S_FALSE&&!Quit)SwitchToThread();}return;}
         }
         Slot* target=nullptr;
-        for(auto& [id,slot]:Slots)if(slot.free && slot.width==static_cast<int>(desc.Width) && slot.height==static_cast<int>(desc.Height)){target=&slot;break;}
-        if(!target){if(profile)++ProfileDropped;if(snapshot){D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT,0};ComPtr<ID3D11Query> q;if(SUCCEEDED(Device->CreateQuery(&qd,&q))){Context->End(q.Get());Context->Flush();while(Context->GetData(q.Get(),nullptr,0,0)==S_FALSE&&!Quit)SwitchToThread();}}return;}
-        if(target->mutex&&target->mutex->AcquireSync(0,0)!=S_OK)return;
+        bool matchingSize=false;
+        for(auto& [id,slot]:Slots){
+            if(slot.width!=static_cast<int>(desc.Width)||slot.height!=static_cast<int>(desc.Height))continue;
+            matchingSize=true;
+            if(!IndependentComposition&&!slot.free)continue;
+            if(slot.mutex&&slot.mutex->AcquireSync(0,0)!=S_OK)continue;
+            target=&slot;
+            break;
+        }
+        if(!target){if(IndependentComposition&&matchingSize)RetryViewPaint();if(profile)++ProfileDropped;if(snapshot){D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT,0};ComPtr<ID3D11Query> q;if(SUCCEEDED(Device->CreateQuery(&qd,&q))){Context->End(q.Get());Context->Flush();while(Context->GetData(q.Get(),nullptr,0,0)==S_FALSE&&!Quit)SwitchToThread();}}return;}
         Lease lease{target};
         target->free=false;
         const double opened=profile?Milliseconds():0;
@@ -258,13 +276,13 @@ public:
         auto d=Message("frame");d->SetInt("slot",target->id);d->SetInt("generation",PoolGeneration);
         d->SetString("sequence",std::to_string(++FrameSequence));Send(d);
     }
-    void OnAfterCreated(CefRefPtr<CefBrowser> browser) override{Browser=browser;Send(Message("created"));}
+    void OnAfterCreated(CefRefPtr<CefBrowser> browser) override{Browser=browser;browser->GetHost()->SetWindowlessFrameRate(TargetFPS);Send(Message("created"));}
     void OnBeforeClose(CefRefPtr<CefBrowser>) override{Browser=nullptr;Quit=true;}
     bool OnBeforePopup(CefRefPtr<CefBrowser>,CefRefPtr<CefFrame>,const CefString&,const CefString&,
         CefLifeSpanHandler::WindowOpenDisposition,bool,const CefPopupFeatures&,CefWindowInfo&,CefRefPtr<CefClient>&,CefBrowserSettings&,
         CefRefPtr<CefDictionaryValue>&,bool*) override{return true;}
     void OnLoadStart(CefRefPtr<CefBrowser>,CefRefPtr<CefFrame> frame,TransitionType) override{
-        if(frame->IsMain())Send(Message("loading"));
+        if(frame->IsMain()){++DocumentSerial;DocumentReady=false;Send(Message("loading"));}
     }
     void OnLoadEnd(CefRefPtr<CefBrowser>,CefRefPtr<CefFrame> frame,int) override{
         if(!frame->IsMain())return;
@@ -276,7 +294,8 @@ public:
         bootstrap+="\n"+ReadResource("selection.js")+"\nwindow.__webuiSelection.setEnabled("+(AllowSelection?std::string("false"):std::string("true"))+");";
         bootstrap+="\nwindow.__webuiIncremental="+std::string(IncrementalDOM?"true":"false")+";window.__webuiAB="+(ABExperiment?"true":"false")+";\n"+ReadResource(ABExperiment||IncrementalDOM?"regions-delta.js":"regions.js");
         frame->ExecuteJavaScript(bootstrap,frame->GetURL(),0);
-        auto d=Message("loaded");d->SetString("url",frame->GetURL());Send(d);
+        DocumentReady=true;
+        auto d=Message("loaded");d->SetString("url",frame->GetURL());d->SetString("document",std::to_string(DocumentSerial));Send(d);
     }
     void OnLoadError(CefRefPtr<CefBrowser>,CefRefPtr<CefFrame> frame,ErrorCode code,const CefString& text,const CefString&) override{
         if(frame->IsMain() && code!=ERR_ABORTED)Error(text.ToString());
@@ -317,7 +336,7 @@ static void Receive(std::string json) {
             if(Browser)Browser->GetHost()->Invalidate(PET_VIEW);return;
         }
         if(op=="pool"){
-            Slots.clear();PoolGeneration=d->GetInt("generation");auto list=d->GetList("slots");
+            Slots.clear();PoolGeneration=d->GetInt("generation");IndependentComposition=d->GetBool("composition");auto list=d->GetList("slots");
             ComPtr<ID3D11Device1> device1;Device.As(&device1);
             for(size_t i=0;i<list->GetSize();++i){auto item=list->GetDictionary(i);Slot s;s.id=item->GetInt("id");s.width=d->GetInt("width");s.height=d->GetInt("height");
                 const HANDLE handle=reinterpret_cast<HANDLE>(std::stoull(item->GetString("handle").ToString()));
@@ -331,12 +350,22 @@ static void Receive(std::string json) {
         auto host=Browser->GetHost();auto frame=Browser->GetMainFrame();
         if(op=="resize"){ViewWidth=std::max(1,d->GetInt("width"));ViewHeight=std::max(1,d->GetInt("height"));host->WasResized();}
         else if(op=="load" || op=="html"){
+            DocumentReady=false;
             {std::lock_guard<std::mutex> lock(ResourceMutex);HTMLOverrideURL=op=="html"?d->GetString("url").ToString():std::string();}
             frame->LoadURL(d->GetString("url"));
         }
         else if(op=="eval")frame->ExecuteJavaScript(d->GetString("script"),frame->GetURL(),0);
+        else if(op=="state"){
+            if(DocumentReady&&d->GetString("document")==std::to_string(DocumentSerial))
+                frame->ExecuteJavaScript(d->GetString("script"),frame->GetURL(),0);
+        }
         else if(op=="hit")frame->ExecuteJavaScript("if(window.webui)webui._queryHitTest("+std::to_string(d->GetInt("id"))+","+std::to_string(d->GetDouble("u"))+","+std::to_string(d->GetDouble("v"))+");",frame->GetURL(),0);
         else if(op=="focus")host->SetFocus(d->GetBool("focus"));
+        else if(op=="repaint")host->Invalidate(PET_VIEW);
+        else if(op=="frameRate"){
+            TargetFPS=std::clamp(d->GetInt("fps"),1,360);
+            host->SetWindowlessFrameRate(TargetFPS);
+        }
         else if(op=="imeSet"){
             CefString text=d->GetString("text");CefCompositionUnderline line;line.range=CefRange(0,uint32_t(text.length()));line.color=0xffe0e0e0;line.thick=false;
             int caret=std::max(0,std::min(int(text.length()),d->GetInt("caret")));host->ImeSetComposition(text,{line},CefRange(UINT32_MAX,UINT32_MAX),CefRange(caret,caret));
@@ -382,7 +411,7 @@ int APIENTRY wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     EnableBridge=!command->HasSwitch("no-bridge");AllowSelection=command->HasSwitch("allow-selection");
     CpuMode=command->HasSwitch("cpu");
     InitialURL=command->GetSwitchValue("url").ToString();if(InitialURL.empty())InitialURL="about:blank";
-    if(command->HasSwitch("fps"))TargetFPS=std::stoi(command->GetSwitchValue("fps").ToString());
+    if(command->HasSwitch("fps"))TargetFPS=std::clamp(std::stoi(command->GetSwitchValue("fps").ToString()),1,360);
     CefSettings settings;settings.no_sandbox=true;settings.windowless_rendering_enabled=true;settings.multi_threaded_message_loop=true;
     CefString(&settings.locale)="en-US";
     CefString(&settings.resources_dir_path)=runtime;CefString(&settings.locales_dir_path)=runtime+L"/locales";

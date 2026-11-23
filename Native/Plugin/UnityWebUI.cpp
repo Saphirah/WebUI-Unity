@@ -17,6 +17,7 @@
 using Microsoft::WRL::ComPtr;
 #define API extern "C" __declspec(dllexport)
 #include "D3D12Surface.h"
+#include "CompositionPresenter.h"
 struct Slot {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<IDXGIKeyedMutex> mutex;
@@ -28,6 +29,7 @@ struct Slot {
     ~Slot(){if(handle)CloseHandle(handle);}
 };
 struct Session {
+    std::unique_ptr<CompositionPresenter> composition;
     std::unique_ptr<D12Surface> d12;
     std::mutex gate;
     int width=0,height=0;
@@ -70,6 +72,28 @@ API HANDLE __cdecl UW_CreatePipe(const wchar_t* name){
 static std::shared_ptr<Session> Find(int id){std::lock_guard<std::mutex> lock(RegistryGate);auto i=Sessions.find(id);return i==Sessions.end()?nullptr:i->second;}
 static int Save(std::shared_ptr<Session> s){std::lock_guard<std::mutex> lock(RegistryGate);int id=++Next;Sessions.emplace(id,s);return id;}
 static bool SizeOK(int w,int h){return w>0&&h>0&&uint64_t(w)*uint64_t(h)<=uint64_t(INT_MAX)/4;}
+API int __cdecl UW_CreateComposition(int width,int height,int* error){
+    *error=E_INVALIDARG;
+    if(!SizeOK(width,height))return 0;
+    HWND window=CompositionPresenter::FindPlayerWindow();
+    if(!window){*error=E_HANDLE;return 0;}
+    auto session=std::make_shared<Session>();
+    session->composition=std::make_unique<CompositionPresenter>(window);
+    *error=session->composition->Start(width,height);
+    return FAILED(*error)?0:Save(session);
+}
+API int __cdecl UW_ResizeComposition(int id,int width,int height){
+    auto s=Find(id);
+    return s&&s->composition&&SizeOK(width,height)?s->composition->Resize(width,height):E_INVALIDARG;
+}
+API void __cdecl UW_ShowComposition(int id,int visible){
+    auto s=Find(id);
+    if(s&&s->composition)s->composition->SetVisible(visible!=0);
+}
+API int __cdecl UW_CompositionActive(int id){
+    auto s=Find(id);
+    return s&&s->composition&&s->composition->active;
+}
 API int __cdecl UW_CreateGPU12(void* texture){
     if(!texture)return 0;auto s=std::make_shared<Session>();s->d12=std::make_unique<D12Surface>();
     auto desc=static_cast<ID3D12Resource*>(texture)->GetDesc();if(!SizeOK(int(desc.Width),int(desc.Height)))return 0;
@@ -119,7 +143,10 @@ API void* __cdecl UW_Output(int id){auto s=Find(id);return s?(s->d12?static_cast
 API int __cdecl UW_Duplicate(int id,int processId,int slot,uint64_t* result){
     auto s=Find(id);if(!s||!result||slot<0||slot>2)return 0;
     HANDLE child=OpenProcess(PROCESS_DUP_HANDLE,FALSE,processId);if(!child)return 0;
-    HANDLE out=nullptr;BOOL ok=DuplicateHandle(GetCurrentProcess(),s->pixels?s->mapping:s->slots[slot].handle,child,&out,0,FALSE,DUPLICATE_SAME_ACCESS);CloseHandle(child);
+    HANDLE out=nullptr;
+    BOOL ok=s->composition?s->composition->Duplicate(child,slot,&out):
+        DuplicateHandle(GetCurrentProcess(),s->pixels?s->mapping:s->slots[slot].handle,child,&out,0,FALSE,DUPLICATE_SAME_ACCESS);
+    CloseHandle(child);
     *result=reinterpret_cast<uint64_t>(out);return ok?1:0;
 }
 API int __cdecl UW_TrackProcess(int id,int processId){
@@ -131,6 +158,7 @@ API int __cdecl UW_TrackProcess(int id,int processId){
 }
 API int __cdecl UW_Adapter(int id,uint32_t* high,uint32_t* low){
     auto s=Find(id);if(!s||!high||!low)return 0;
+    if(s->composition){auto luid=s->composition->Adapter();*high=uint32_t(luid.HighPart);*low=luid.LowPart;return 1;}
     if(s->d12){auto luid=s->d12->device->GetAdapterLuid();*high=uint32_t(luid.HighPart);*low=luid.LowPart;return 1;}
     if(!s->device)return 0;
     ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> a;DXGI_ADAPTER_DESC d{};
@@ -139,6 +167,7 @@ API int __cdecl UW_Adapter(int id,uint32_t* high,uint32_t* low){
 }
 API void __cdecl UW_Frame(int id,int slot,uint64_t sequence){
     auto s=Find(id);if(!s||slot<0||slot>2||s->pixels)return;
+    if(s->composition){s->composition->Submit(slot,sequence);return;}
     std::lock_guard<std::mutex> lock(s->gate);auto& q=s->slots[slot];if(q.retiring||q.ready)return;q.ready=true;q.sequence=sequence;
 }
 API int __cdecl UW_Release(int id){
@@ -194,8 +223,8 @@ API void __cdecl UW_Render(int id){
 API void __cdecl UW_RequestProbe(int id){auto s=Find(id);if(s)s->probe=true;}
 API int __cdecl UW_ProbeAlpha(int id){auto s=Find(id);return s?s->alpha.load():-2;}
 API void* __cdecl UW_GetRenderEvent(){return reinterpret_cast<void*>(&UW_Render);}
-API int __cdecl UW_Error(int id){auto s=Find(id);return s?s->error.load():-1;}
-API int __cdecl UW_Copies(int id){auto s=Find(id);return s?s->copies.load():0;}
+API int __cdecl UW_Error(int id){auto s=Find(id);return !s?-1:s->composition?s->composition->error.load():s->error.load();}
+API int __cdecl UW_Copies(int id){auto s=Find(id);return !s?0:s->composition?s->composition->presented.load():s->copies.load();}
 API int __cdecl UW_ReadCPU(int id,void* destination,int capacity){
     auto s=Find(id);if(!s||!s->pixels||!destination||capacity<s->width*s->height*4)return 0;
     CpuFrame* newest=nullptr;CpuFrame* owned[3]{};
@@ -204,4 +233,15 @@ API int __cdecl UW_ReadCPU(int id,void* destination,int capacity){
     for(auto q:owned)if(q)InterlockedExchange(&q->state,0);
     return newest?1:0;
 }
-API void __cdecl UW_Close(int id){std::lock_guard<std::mutex> lock(RegistryGate);auto it=Sessions.find(id);if(it!=Sessions.end()){if(it->second->d12&&!it->second->d12->Complete())Retired.push_back(it->second);Sessions.erase(it);}}
+API void __cdecl UW_Close(int id){
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(RegistryGate);
+        auto it=Sessions.find(id);
+        if(it==Sessions.end())return;
+        session=std::move(it->second);
+        if(session->d12&&!session->d12->Complete())Retired.push_back(session);
+        Sessions.erase(it);
+    }
+    // The composition worker joins outside the process-wide registry lock.
+}

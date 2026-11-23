@@ -9,13 +9,21 @@
     if (t-last < 1000/60) return;
     last=t;
     const regions=[];
-    const styles=new WeakMap(),bounds=new WeakMap();
+    const styles=new WeakMap(),bounds=new WeakMap(),invisible=new WeakMap();
     const styleOf=e=>{let s=styles.get(e);if(!s){s=getComputedStyle(e);styles.set(e,s)}return s;};
+    const opacityHidden=e=>{
+      const path=[];
+      while(e&&!invisible.has(e)&&Number(styleOf(e).opacity)!==0){path.push(e);e=e.parentElement;}
+      const hidden=e!==null&&invisible.get(e)!==false;
+      if(e)invisible.set(e,hidden);
+      for(const node of path)invisible.set(node,hidden);
+      return hidden;
+    };
     const boundsOf=e=>{let r=bounds.get(e);if(!r){r=e.getBoundingClientRect();bounds.set(e,r)}return r;};
     for (const e of document.querySelectorAll('body *')) {
       if (e.matches('#root,#app,[data-webui-root],script,style,link,meta')) continue;
       const style=styleOf(e);
-      if (style.pointerEvents==='none' || style.visibility!=='visible') continue;
+      if (style.pointerEvents==='none' || style.visibility!=='visible' || opacityHidden(e)) continue;
       for (const rect of e.getClientRects()) {
         let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
         for (let p=e.parentElement;p && right>left && bottom>top;p=p.parentElement) {

@@ -13,13 +13,24 @@ using Microsoft.Win32.SafeHandles;
 namespace WebUI {
     /// <summary>One independent CEF process and bounded asynchronous pipe. Pump() delivers public callbacks on Unity's main thread.</summary>
     public sealed class BrowserSession : IDisposable {
-        int id,width,height;readonly int ownerId;readonly bool cpu,d3d12;
+        int id,width,height;readonly int ownerId;readonly bool cpu,d3d12,composition;
+        int frameRate;
         readonly object surfaceGate=new object();int generation=1;
         readonly string runtimeRoot,contentRoot;
         readonly HashSet<string> trusted;
         readonly CancellationTokenSource lifetime=new CancellationTokenSource();
         readonly ConcurrentQueue<byte[]> outgoing=new ConcurrentQueue<byte[]>();
-        readonly SemaphoreSlim wake=new SemaphoreSlim(0);
+        readonly SemaphoreSlim wake=new SemaphoreSlim(0,1);
+        readonly object stateGate=new object();
+        readonly Dictionary<string,StateUpdate> stateUpdates=new Dictionary<string,StateUpdate>();
+        string stateDocument;
+        int stateBytes;
+        const int StateLimit=4*1024*1024;
+        sealed class StateUpdate{
+            public Dictionary<string,(JToken Value,int Bytes)> Fields;
+            public string Name,ResetField,Document;
+            public int Bytes;
+        }
         readonly ConcurrentQueue<Action> main=new ConcurrentQueue<Action>();
         readonly ConcurrentDictionary<long,TaskCompletionSource<JToken>> pending=new ConcurrentDictionary<long,TaskCompletionSource<JToken>>();
         readonly HitRegions regions=new HitRegions();
@@ -36,8 +47,10 @@ namespace WebUI {
         public long FramesReceived=>Interlocked.Read(ref framesReceived);
         long framesReceived;
         public string URL {get;private set;}="about:blank";
-        internal BrowserSession(int nativeId,int width,int height,bool cpu,string runtimeRoot,string contentRoot,IEnumerable<string> origins,bool d3d12=false){
+        internal BrowserSession(int nativeId,int width,int height,bool cpu,string runtimeRoot,string contentRoot,IEnumerable<string> origins,bool d3d12=false,bool composition=false,int frameRate=120){
             this.d3d12=d3d12;
+            this.composition=composition;
+            this.frameRate=Math.Max(1,Math.Min(360,frameRate));
             id=ownerId=nativeId;this.width=width;this.height=height;this.cpu=cpu;this.runtimeRoot=Path.GetFullPath(runtimeRoot);
             this.contentRoot=Path.GetFullPath(contentRoot);trusted=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach(var origin in origins??Array.Empty<string>())if(Uri.TryCreate(origin,UriKind.Absolute,out var uri))trusted.Add(uri.GetLeftPart(UriPartial.Authority));
@@ -52,7 +65,7 @@ namespace WebUI {
             pipe=new NamedPipeServerStream(PipeDirection.InOut,true,false,handlePipe);
             uint high=0,low=0;if(!cpu&&Native.UW_Adapter(id,out high,out low)==0)throw new InvalidOperationException("No D3D11 adapter LUID");
             string cache=Path.Combine(Path.GetTempPath(),"UnityWebUI",Guid.NewGuid().ToString("N"));
-            string args="--pipe="+Quote("\\\\.\\pipe\\"+name)+" --runtime="+Quote(cef)+" --resources="+Quote(Path.Combine(runtimeRoot,"BrowserResources"))+" --cache="+Quote(cache)+" --url=about:blank --fps=120 --adapter="+high+","+low+(cpu?" --cpu":"");
+            string args="--pipe="+Quote("\\\\.\\pipe\\"+name)+" --runtime="+Quote(cef)+" --resources="+Quote(Path.Combine(runtimeRoot,"BrowserResources"))+" --cache="+Quote(cache)+" --url=about:blank --fps="+frameRate+" --adapter="+high+","+low+(cpu?" --cpu":"");
             var start=new ProcessStartInfo(exe,args){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=cef};
             // Unity's protocol consumes deltas regardless of unrelated Unreal profiling overrides.
             start.EnvironmentVariables["WEBUI_INCREMENTAL_DOM"]="1";start.EnvironmentVariables["WEBUI_AB"]="0";start.EnvironmentVariables.Remove("WEBUI_GPU_PROFILE");
@@ -62,7 +75,8 @@ namespace WebUI {
                 timeout.CancelAfter(TimeSpan.FromSeconds(15));await pipe.WaitForConnectionAsync(timeout.Token);
             }
             if(Volatile.Read(ref disposed)!=0)throw new ObjectDisposedException(nameof(BrowserSession));
-            writer=Task.Run(WriteLoop);reader=Task.Run(ReadLoop);releases=Task.Run(ReleaseLoop);
+            writer=Task.Run(WriteLoop);reader=Task.Run(ReadLoop);
+            if(!cpu&&!composition)releases=Task.Run(ReleaseLoop);
             if(await Task.WhenAny(created.Task,Task.Delay(15000,lifetime.Token))!=created.Task)throw new TimeoutException("CEF browser creation timed out");
             PublishSurface();
             // Host sends created before processing load/pool commands on its UI thread.
@@ -73,7 +87,7 @@ namespace WebUI {
                 Send(new JObject{["op"]="cpuPool",["handle"]=handle.ToString(),["width"]=width,["height"]=height});
             }else{
                 var slots=new JArray();for(int i=0;i<3;i++){if(Native.UW_Duplicate(id,host.Id,i,out var handle)==0)throw new IOException("Cannot share GPU ring");slots.Add(new JObject{["id"]=i,["handle"]=handle.ToString()});}
-                Send(new JObject{["op"]="pool",["generation"]=generation,["width"]=width,["height"]=height,["slots"]=slots,["d3d12"]=d3d12});
+                Send(new JObject{["op"]="pool",["generation"]=generation,["width"]=width,["height"]=height,["slots"]=slots,["d3d12"]=d3d12,["composition"]=composition});
             }
             Send(new JObject{["op"]="resize",["width"]=width,["height"]=height});
         }
@@ -85,6 +99,23 @@ namespace WebUI {
                 if(previous!=ownerId)Native.UW_Close(previous);
             }
         }
+        internal void ResizeComposition(int newWidth,int newHeight){
+            lock(surfaceGate){
+                int result=Native.UW_ResizeComposition(id,newWidth,newHeight);
+                if(result<0)throw new InvalidOperationException($"Cannot resize DirectComposition surfaces (0x{result:X8})");
+                width=newWidth;height=newHeight;++generation;
+                PublishSurface();
+            }
+        }
+        internal void ShowComposition(bool visible){
+            Native.UW_ShowComposition(id,visible?1:0);
+            if(visible)RequestRepaint();
+        }
+        internal void RequestRepaint()=>Send(new JObject{["op"]="repaint"});
+        public void SetFrameRate(int fps){
+            frameRate=Math.Max(1,Math.Min(360,fps));
+            if(writer!=null)Send(new JObject{["op"]="frameRate",["fps"]=frameRate});
+        }
         static string Quote(string s){if(s.Contains("\"")||s.Contains("\r")||s.Contains("\n"))throw new ArgumentException("Invalid process argument");return "\""+s+"\"";}
         void Post(Action action){if(Interlocked.Increment(ref mainCount)>4096){Interlocked.Decrement(ref mainCount);return;}main.Enqueue(action);}
         public void Pump(){for(int n=0;n<256&&main.TryDequeue(out var action);n++){Interlocked.Decrement(ref mainCount);action();}}
@@ -94,12 +125,39 @@ namespace WebUI {
             byte[] bytes=Encoding.UTF8.GetBytes(packet.ToString(Formatting.None));
             if(bytes.Length>16*1024*1024)throw new ArgumentException("Packet exceeds 16 MiB");
             if(Interlocked.Add(ref queuedBytes,bytes.Length)>64*1024*1024){Interlocked.Add(ref queuedBytes,-bytes.Length);throw new IOException("Browser send queue exceeded 64 MiB");}
-            outgoing.Enqueue(bytes);wake.Release();
+            outgoing.Enqueue(bytes);WakeWriter();
         }
-        async Task WriteLoop(){try{while(!lifetime.IsCancellationRequested){await wake.WaitAsync(lifetime.Token).ConfigureAwait(false);
-            while(outgoing.TryDequeue(out var bytes)){Interlocked.Add(ref queuedBytes,-bytes.Length);var prefix=BitConverter.GetBytes(bytes.Length);
-                await pipe.WriteAsync(prefix,0,4,lifetime.Token).ConfigureAwait(false);await pipe.WriteAsync(bytes,0,bytes.Length,lifetime.Token).ConfigureAwait(false);}
-        }}catch(Exception e){Fail(e);}}
+        void WakeWriter(){if(wake.CurrentCount==0){try{wake.Release();}catch(SemaphoreFullException){}}}
+        async Task WritePacket(byte[] bytes){
+            var prefix=BitConverter.GetBytes(bytes.Length);
+            await pipe.WriteAsync(prefix,0,4,lifetime.Token).ConfigureAwait(false);
+            await pipe.WriteAsync(bytes,0,bytes.Length,lifetime.Token).ConfigureAwait(false);
+        }
+        async Task WriteLoop(){
+            try{
+                while(!lifetime.IsCancellationRequested){
+                    await wake.WaitAsync(lifetime.Token).ConfigureAwait(false);
+                    while(!lifetime.IsCancellationRequested){
+                        if(outgoing.TryDequeue(out var bytes)){
+                            Interlocked.Add(ref queuedBytes,-bytes.Length);
+                            await WritePacket(bytes).ConfigureAwait(false);
+                            continue;
+                        }
+                        var state=TakeState();
+                        if(state==null)break;
+                        var data=new JObject();
+                        foreach(var field in state.Fields)data.Add(field.Key,field.Value.Value);
+                        string script="globalThis.ue?.interface["+JsonConvert.SerializeObject(state.Name)+"]?.(JSON.parse("+
+                            JsonConvert.SerializeObject(data.ToString(Formatting.None))+"));";
+                        var packet=new JObject{["op"]="state",["document"]=state.Document,["script"]=script};
+                        bytes=Encoding.UTF8.GetBytes(packet.ToString(Formatting.None));
+                        bool current;
+                        lock(stateGate)current=state.Document==stateDocument;
+                        if(current)await WritePacket(bytes).ConfigureAwait(false);
+                    }
+                }
+            }catch(Exception e){Fail(e);}
+        }
         async Task ReadExactly(byte[] bytes){int offset=0;while(offset<bytes.Length){int n=await pipe.ReadAsync(bytes,offset,bytes.Length-offset,lifetime.Token).ConfigureAwait(false);if(n==0)throw new EndOfStreamException("CEF pipe closed");offset+=n;}}
         async Task ReadLoop(){try{while(!lifetime.IsCancellationRequested){var prefix=new byte[4];await ReadExactly(prefix).ConfigureAwait(false);int count=BitConverter.ToInt32(prefix,0);
             if(count<=0||count>16*1024*1024)throw new IOException("Invalid frame length");var data=new byte[count];await ReadExactly(data).ConfigureAwait(false);Receive(JObject.Parse(Encoding.UTF8.GetString(data)));
@@ -112,9 +170,13 @@ namespace WebUI {
                 case "created":created.TrySetResult(true);break;
                 case "frame": lock(surfaceGate){if((int?)p["generation"]==generation){Interlocked.Increment(ref framesReceived);Native.UW_Frame(id,(int)p["slot"],ulong.Parse((string)p["sequence"]));}}break;
                 case "regionsDelta": regions.Update(p);break;
-                case "loading":regions.Clear();break;
+                case "loading":regions.Clear();ResetStateDocument();break;
                 case "url":string url=(string)p["url"];Post(()=>URL=url);break;
-                case "loaded":string loaded=(string)p["url"];if(loaded!="about:blank")Post(()=>{URL=loaded;Loaded?.Invoke(loaded);});break;
+                case "loaded":
+                    string loaded=(string)p["url"];
+                    ResetStateDocument(Trusted(loaded)?(string)p["document"]:null);
+                    if(loaded!="about:blank")Post(()=>{URL=loaded;Loaded?.Invoke(loaded);});
+                    break;
                 case "error":string error=(string)p["message"];Post(()=>Error?.Invoke(error));break;
                 case "resource":
                     if(Interlocked.Increment(ref resourceCount)>16){Interlocked.Decrement(ref resourceCount);ResourceReply((int)p["id"],429,"text/plain",Array.Empty<byte>());break;}
@@ -148,8 +210,93 @@ namespace WebUI {
             string ext=Path.GetExtension(full).ToLowerInvariant();string mime=ext==".html"?"text/html":ext==".js"||ext==".mjs"?"text/javascript":ext==".css"?"text/css":ext==".json"?"application/json":ext==".svg"?"image/svg+xml":ext==".png"?"image/png":ext==".jpg"?"image/jpeg":ext==".wasm"?"application/wasm":ext==".woff2"?"font/woff2":"application/octet-stream";
             ResourceReply(key,200,mime,File.ReadAllBytes(full));
         }
-        public void LoadURL(string url){if(!Uri.TryCreate(url,UriKind.Absolute,out var uri)||(uri.Scheme!="http"&&uri.Scheme!="https"))throw new ArgumentException("Use an HTTP(S) URL or LoadHTML");html=null;Send(new JObject{["op"]="load",["url"]=url});}
-        public void LoadHTML(string content){if(content==null||Encoding.UTF8.GetByteCount(content)>8*1024*1024)throw new ArgumentException("HTML must be <=8 MiB");html=content;Send(new JObject{["op"]="html",["url"]="https://ue.local/index.html"});}
+        public void LoadURL(string url){if(!Uri.TryCreate(url,UriKind.Absolute,out var uri)||(uri.Scheme!="http"&&uri.Scheme!="https"))throw new ArgumentException("Use an HTTP(S) URL or LoadHTML");ResetStateDocument();html=null;Send(new JObject{["op"]="load",["url"]=url});}
+        public void LoadHTML(string content){if(content==null||Encoding.UTF8.GetByteCount(content)>8*1024*1024)throw new ArgumentException("HTML must be <=8 MiB");ResetStateDocument();html=content;Send(new JObject{["op"]="html",["url"]="https://ue.local/index.html"});}
+        void ResetStateDocument(string document=null){
+            lock(stateGate){
+                stateDocument=document;
+                stateUpdates.Clear();stateBytes=0;
+            }
+        }
+        StateUpdate TakeState(){
+            lock(stateGate){
+                if(stateUpdates.Count==0)return null;
+                using(var entries=stateUpdates.GetEnumerator()){
+                    entries.MoveNext();
+                    var entry=entries.Current;
+                    stateUpdates.Remove(entry.Key);
+                    stateBytes-=entry.Value.Bytes;
+                    return entry.Value;
+                }
+            }
+        }
+        static bool MeasureState(JToken value,int depth,ref int nodes,ref long bytes){
+            if(depth>64||++nodes>100000)return false;
+            bytes+=192;
+            if(value is JValue scalar){
+                if(scalar.Type!=JTokenType.String&&scalar.Type!=JTokenType.Boolean&&scalar.Type!=JTokenType.Null&&
+                    scalar.Type!=JTokenType.Integer&&scalar.Type!=JTokenType.Float)return false;
+                if(scalar.Value is System.Numerics.BigInteger)return false;
+                if(scalar.Value is string str)bytes+=24L*str.Length;
+            }else if(value is JObject obj){
+                foreach(var field in obj.Properties()){
+                    bytes+=24L*field.Name.Length;
+                    if(bytes>StateLimit||!MeasureState(field.Value,depth+1,ref nodes,ref bytes))return false;
+                }
+            }else if(value is JArray array){
+                foreach(var item in array)if(!MeasureState(item,depth+1,ref nodes,ref bytes))return false;
+            }else return false;
+            return bytes<=StateLimit;
+        }
+        /// <summary>Queue absolute object fields for a trusted document. Acceptance is local and does not acknowledge JavaScript execution.</summary>
+        public bool TryCallStateAsync(string name,JObject delta,string fullStateField="uiReset"){
+            if(string.IsNullOrEmpty(name)||name.Length>256||delta==null||Volatile.Read(ref disposed)!=0)return false;
+            fullStateField=fullStateField??"";
+            string document;
+            lock(stateGate)document=stateDocument;
+            if(document==null)return false;
+            var fields=new Dictionary<string,(JToken Value,int Bytes)>();
+            int nodes=0;
+            long bytes=0;
+            foreach(var field in delta.Properties()){
+                long previous=bytes;
+                bytes+=24L*field.Name.Length;
+                if(!MeasureState(field.Value,1,ref nodes,ref bytes))return false;
+                fields.Add(field.Name,(field.Value.DeepClone(),(int)(bytes-previous)));
+            }
+            bool reset=!string.IsNullOrEmpty(fullStateField)&&delta[fullStateField]?.Type==JTokenType.Boolean&&(bool)delta[fullStateField];
+            lock(stateGate){
+                if(document!=stateDocument||Volatile.Read(ref disposed)!=0)return false;
+                stateUpdates.TryGetValue(name,out var pendingState);
+                if(pendingState==null&&stateUpdates.Count>=16)return false;
+                if(pendingState!=null&&!reset&&pendingState.ResetField!=fullStateField)return false;
+                int oldSize=pendingState?.Bytes??0;
+                int mergedSize=reset?0:oldSize;
+                foreach(var field in fields){
+                    if(!reset&&pendingState!=null&&pendingState.Fields.TryGetValue(field.Key,out var previous)){
+                        if(field.Key==fullStateField&&previous.Value.Type==JTokenType.Boolean&&(bool)previous.Value)continue;
+                        mergedSize-=previous.Bytes;
+                    }
+                    mergedSize+=field.Value.Bytes;
+                }
+                if(mergedSize>StateLimit||stateBytes-oldSize+mergedSize>4*StateLimit)return false;
+                if(pendingState==null||reset){
+                    stateUpdates[name]=pendingState=new StateUpdate{Name=name,Document=document,ResetField=fullStateField,Fields=fields};
+                }else{
+                    foreach(var field in fields){
+                        // Keep the full-snapshot marker when a delta is merged into it.
+                        if(field.Key==fullStateField&&pendingState.Fields.TryGetValue(field.Key,out var previous)&&
+                            previous.Value.Type==JTokenType.Boolean&&(bool)previous.Value)continue;
+                        pendingState.Fields[field.Key]=field.Value;
+                    }
+                }
+                stateBytes-=oldSize;
+                pendingState.Bytes=mergedSize;
+                stateBytes+=mergedSize;
+            }
+            WakeWriter();
+            return true;
+        }
         public void Evaluate(string script)=>Send(new JObject{["op"]="eval",["script"]=script});
         public async Task<JToken> CallAsync(string name,JToken argument,TimeSpan? timeout=null){
             long key=Interlocked.Increment(ref requestId);var done=new TaskCompletionSource<JToken>(TaskCreationOptions.RunContinuationsAsynchronously);pending[key]=done;
@@ -162,6 +309,7 @@ namespace WebUI {
         public void Focus(bool focus)=>Send(new JObject{["op"]="focus",["focus"]=focus});
         public void Dispose(){
             if(Interlocked.Exchange(ref disposed,1)!=0)return;
+            ResetStateDocument();
             lifetime.Cancel();pipe?.Dispose();
             foreach(var entry in pending)entry.Value.TrySetCanceled();pending.Clear();
             // Kill only the process we created. Host detects pipe loss; descendants exit with CEF.

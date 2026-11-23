@@ -22,11 +22,11 @@ if($LASTEXITCODE -ne 0){throw 'CEF wrapper configuration failed'}
 & $CMake --build $WrapperBuild --target libcef_dll_wrapper --config Release --parallel 8
 if($LASTEXITCODE -ne 0){throw 'CEF wrapper build failed'}
 if(!$HostOnly){
-    & cl.exe /nologo /std:c++20 /EHsc /MD /O2 /LD "$Root/Native/Plugin/UnityWebUI.cpp" "/Fo$Out/UnityWebUI.obj" "/Fe$Package/Plugins/x86_64/UnityWebUINative.dll" d3d11.lib d3d12.lib dxgi.lib advapi32.lib d3dcompiler.lib /link "/IMPLIB:$Out/UnityWebUINative.lib"
+    & cl.exe /nologo /std:c++20 /EHsc /MD /O2 /LD "$Root/Native/Plugin/UnityWebUI.cpp" "/Fo$Out/UnityWebUI.obj" "/Fe$Package/Plugins/x86_64/UnityWebUINative.dll" d3d11.lib d3d12.lib dxgi.lib advapi32.lib d3dcompiler.lib dcomp.lib ole32.lib user32.lib /link "/IMPLIB:$Out/UnityWebUINative.lib"
     if($LASTEXITCODE -ne 0){throw 'Native Unity adapter build failed'}
 }
 $Arguments=@('/nologo','/std:c++20','/EHsc','/MD','/O2','/DUNICODE','/D_UNICODE',"/I$CEF","/Fo$Out/WebUIHost.obj","/Fe$Data/WebUIHost.exe","$Root/Native/Host/WebUIHost.cpp",
- "$CEF/Release/libcef.lib","$WrapperBuild/libcef_dll_wrapper/Release/libcef_dll_wrapper.lib",'d3d11.lib','dxgi.lib','user32.lib','shell32.lib','shlwapi.lib','advapi32.lib','ole32.lib','delayimp.lib','/link','/SUBSYSTEM:WINDOWS','/DELAYLOAD:libcef.dll')
+ "$CEF/Release/libcef.lib","$WrapperBuild/libcef_dll_wrapper/Release/libcef_dll_wrapper.lib",'d3d11.lib','d3dcompiler.lib','dxgi.lib','user32.lib','shell32.lib','shlwapi.lib','advapi32.lib','ole32.lib','delayimp.lib','/link','/SUBSYSTEM:WINDOWS','/DELAYLOAD:libcef.dll')
 & cl.exe @Arguments
 if($LASTEXITCODE -ne 0){throw 'CEF host build failed'}
 New-Item -ItemType Directory -Force "$Data/CEF" | Out-Null
